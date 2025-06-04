@@ -7,15 +7,13 @@ EXPOSE 8000/tcp
 
 LABEL version="0.0.3"
 
-ARG IMAGE_NAME
-
 LABEL permissions='\
 {\
   "ExposedPorts": {\
     "8000/tcp": {}\
   },\
   "HostConfig": {\
-    "Binds":["/usr/blueos/extensions/$IMAGE_NAME:/app"],\
+    "Binds":["/usr/blueos/extensions/ntrip-to-mavlink/config:/app/config"],\
     "ExtraHosts": ["host.docker.internal:host-gateway"],\
     "PortBindings": {\
       "8000/tcp": [\
@@ -27,29 +25,24 @@ LABEL permissions='\
   }\
 }'
 
-ARG AUTHOR
-ARG AUTHOR_EMAIL
 LABEL authors='[\
     {\
-        "name": "$AUTHOR",\
-        "email": "$AUTHOR_EMAIL"\
+        "name": "Willian Galvani",\
+        "email": "willian@bluerobotics.com"\
     }\
 ]'
 
-ARG MAINTAINER
-ARG MAINTAINER_EMAIL
 LABEL company='{\
         "about": "",\
-        "name": "$MAINTAINER",\
-        "email": "$MAINTAINER_EMAIL"\
+        "name": "Blue Robotics",\
+        "email": "support@bluerobotics.com"\
     }'
-LABEL type="example"
-ARG REPO
-ARG OWNER
-LABEL readme='https://raw.githubusercontent.com/$OWNER/$REPO/{tag}/README.md'
+LABEL type="ntrip-to-mavlink"
+LABEL readme='https://raw.githubusercontent.com/williangalvani/BlueOS-Ntrip-extension/{tag}/README.md'
 LABEL links='{\
-        "source": "https://github.com/$OWNER/$REPO"\
+        "source": "https://github.com/williangalvani/BlueOS-Ntrip-extension"\
     }'
 LABEL requirements="core >= 1.1"
 
-ENTRYPOINT litestar run --host 0.0.0.0
+WORKDIR /app
+ENTRYPOINT ["python", "main.py", "--host", "0.0.0.0", "--config-file", "config/rtk_config.json"]

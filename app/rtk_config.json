@@ -1,0 +1,8 @@
+{
+  "ntrip_url": "http://rtk2go.com:2101",
+  "username": "williangalvani@gmail.com",
+  "password": "none",
+  "mountpoint": "MYMP0",
+  "mavlink2rest_url": "http://172.25.177.36:6040",
+  "enabled": true
+}

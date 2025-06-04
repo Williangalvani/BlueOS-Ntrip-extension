@@ -1,14 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "quickstart"
-version = "0.0.2"
-description = "BlueOS QuickStart Example Extension"
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-]
+name = "blueos-rtk-extension"
+version = "1.0.0"
+description = "BlueOS RTK NTRIP Extension for high-precision positioning"
 dependencies = [
     "requests",
     "litestar[standard]",
+    "pydantic",
+    "aiohttp",
 ]
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.package-data]
+"*" = ["static/*", "static/**/*"]
+
+[tool.setuptools.packages.find]
+exclude = ["config*", "logs*", "build*", ".venv*", "*.egg-info*"]
 

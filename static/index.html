@@ -125,9 +125,6 @@
             color: #666;
             margin-top: 5px;
         }
-        .config-section {
-            margin-bottom: 20px;
-        }
     </style>
 </head>
 <body>
@@ -151,42 +148,30 @@
             </div>
 
             <div class="section">
-                <h2>⚙️ Configuration</h2>
+                <h2>⚙️ NTRIP Configuration</h2>
                 <form id="config-form">
-                    <div class="config-section">
-                        <h3>🌐 NTRIP Settings</h3>
-                        <div class="form-group">
-                            <label for="ntrip-url">NTRIP Caster URL:</label>
-                            <input type="url" id="ntrip-url" name="ntrip_url" placeholder="rtk2go.com:2101" required>
-                            <div class="help-text">Enter the NTRIP caster hostname and port (e.g., rtk2go.com:2101)</div>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="mountpoint">Mountpoint:</label>
-                            <input type="text" id="mountpoint" name="mountpoint" placeholder="YOUR_MOUNTPOINT" required>
-                            <div class="help-text">The NTRIP mountpoint for your correction stream</div>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="username">Username:</label>
-                            <input type="text" id="username" name="username" placeholder="username">
-                            <div class="help-text">Leave empty if no authentication required</div>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="password">Password:</label>
-                            <input type="password" id="password" name="password" placeholder="password">
-                            <div class="help-text">Leave empty if no authentication required</div>
-                        </div>
+                    <div class="form-group">
+                        <label for="ntrip-url">NTRIP Caster URL:</label>
+                        <input type="url" id="ntrip-url" name="ntrip_url" placeholder="rtk2go.com:2101" required>
+                        <div class="help-text">Enter the NTRIP caster hostname and port (e.g., rtk2go.com:2101)</div>
                     </div>
 
-                    <div class="config-section">
-                        <h3>🔗 MAVLink Settings</h3>
-                        <div class="form-group">
-                            <label for="mavlink2rest-url">mavlink2rest URL:</label>
-                            <input type="url" id="mavlink2rest-url" name="mavlink2rest_url" placeholder="http://localhost:6040" required>
-                            <div class="help-text">URL of the mavlink2rest service for sending RTCM data</div>
-                        </div>
+                    <div class="form-group">
+                        <label for="mountpoint">Mountpoint:</label>
+                        <input type="text" id="mountpoint" name="mountpoint" placeholder="YOUR_MOUNTPOINT" required>
+                        <div class="help-text">The NTRIP mountpoint for your correction stream</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="username">Username:</label>
+                        <input type="text" id="username" name="username" placeholder="username">
+                        <div class="help-text">Leave empty if no authentication required</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="password">Password:</label>
+                        <input type="password" id="password" name="password" placeholder="password">
+                        <div class="help-text">Leave empty if no authentication required</div>
                     </div>
 
                     <div class="form-group">
@@ -208,7 +193,6 @@
                     <li><strong>RTCM:</strong> Radio Technical Commission for Maritime Services correction format</li>
                     <li><strong>RTK:</strong> Real-Time Kinematic positioning for centimeter-level accuracy</li>
                 </ul>
-                <p><strong>Local Mode:</strong> Configuration is stored in a local JSON file and can be run on any machine without special privileges.</p>
             </div>
         </div>
     </div>
@@ -234,7 +218,6 @@
             document.getElementById('mountpoint').value = config.mountpoint || '';
             document.getElementById('username').value = config.username || '';
             document.getElementById('password').value = config.password || '';
-            document.getElementById('mavlink2rest-url').value = config.mavlink2rest_url || 'http://localhost:6040';
             document.getElementById('enabled').checked = config.enabled || false;
         }
 
@@ -310,7 +293,6 @@
                 mountpoint: document.getElementById('mountpoint').value,
                 username: document.getElementById('username').value,
                 password: document.getElementById('password').value,
-                mavlink2rest_url: document.getElementById('mavlink2rest-url').value,
                 enabled: document.getElementById('enabled').checked
             };
 
