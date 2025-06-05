@@ -37,7 +37,7 @@ LABEL company='{\
         "name": "Blue Robotics",\
         "email": "support@bluerobotics.com"\
     }'
-LABEL type="ntrip-to-mavlink"
+LABEL type="other"
 LABEL readme='https://raw.githubusercontent.com/williangalvani/BlueOS-Ntrip-extension/{tag}/README.md'
 LABEL links='{\
         "source": "https://github.com/williangalvani/BlueOS-Ntrip-extension"\
