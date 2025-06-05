@@ -239,57 +239,119 @@ class RTKController(Controller):
         self._ntrip_task = asyncio.create_task(self._ntrip_client_loop())
 
     async def _ntrip_client_loop(self):
-        """Main NTRIP client loop"""
-        try:
-            while True:
+        """Main NTRIP client loop - retries on ALL errors and disconnections"""
+        reconnect_delay = 5  # Start with 5 seconds
+        max_reconnect_delay = 300  # Max 5 minutes
+        consecutive_failures = 0
+
+        print("🔄 Starting NTRIP client loop with automatic reconnection")
+
+        # Main reconnection loop - this will ALWAYS retry unless explicitly cancelled
+        while True:
+            connection_start_time = datetime.now()
+
+            try:
+                # Validate configuration before attempting connection
+                if not self._config.ntrip_url:
+                    raise Exception("NTRIP URL not configured")
+                if not self._config.mountpoint:
+                    raise Exception("NTRIP mountpoint not configured")
+
+                print(f"🔗 Connection attempt #{consecutive_failures + 1}")
+
+                # Attempt connection and data streaming
+                await self._connect_ntrip()
+
+                # If we reach here, the connection ended (which shouldn't happen in normal operation)
+                # This means the connection was lost and we should retry
+                raise Exception("Connection ended unexpectedly")
+
+            except asyncio.CancelledError:
+                # This is the ONLY exception that should stop the retry loop
+                self._status.connected = False
+                self._status.error_message = "Connection cancelled by user"
+                self._status.last_update = datetime.now().isoformat()
+                print("🛑 NTRIP client loop cancelled by user request")
+                break  # Exit the retry loop
+
+            except Exception as e:
+                # ALL other exceptions trigger a retry attempt
+                consecutive_failures += 1
+                connection_duration = (datetime.now() - connection_start_time).total_seconds()
+
+                # Update status to reflect the error
+                self._status.connected = False
+                self._status.error_message = str(e)
+                self._status.last_update = datetime.now().isoformat()
+
+                # Calculate exponential backoff delay
+                reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+
+                # Log the error and retry information
+                print(f"❌ NTRIP connection failed (attempt #{consecutive_failures})")
+                print(f"   Error: {e}")
+                print(f"   Connection duration: {connection_duration:.1f} seconds")
+                print(f"   Error type: {type(e).__name__}")
+
+                # If connection was very short, it might be a configuration issue
+                if connection_duration < 5.0 and consecutive_failures >= 3:
+                    print(f"   ⚠️  Rapid failures detected - possible configuration issue")
+
+                print(f"⏳ Retrying in {reconnect_delay:.1f} seconds...")
+
                 try:
-                    # Parse NTRIP URL
-                    if not self._config.ntrip_url:
-                        raise Exception("NTRIP URL not configured")
-
-                    # Connect to NTRIP caster
-                    await self._connect_ntrip()
-
-                except Exception as e:
+                    await asyncio.sleep(reconnect_delay)
+                except asyncio.CancelledError:
+                    # Even during sleep, respect cancellation
                     self._status.connected = False
-                    self._status.error_message = str(e)
+                    self._status.error_message = "Connection cancelled during retry delay"
                     self._status.last_update = datetime.now().isoformat()
-                    print(f"NTRIP connection error: {e}")
-                    await asyncio.sleep(10)  # Retry after 10 seconds
+                    print("🛑 NTRIP client loop cancelled during retry delay")
+                    break
 
-        except asyncio.CancelledError:
-            self._status.connected = False
-            self._status.error_message = "Connection cancelled"
+            # Reset failure counter only after a successful connection that lasted some time
+            # (If _connect_ntrip returns normally, we'll reset it there)
+
+        print("🏁 NTRIP client loop terminated")
 
     async def _connect_ntrip(self):
-        """Connect to NTRIP caster and forward RTCM data"""
-        # Parse URL properly
-        url_parts = self._config.ntrip_url.replace('http://', '').replace('https://', '')
-        if ':' in url_parts:
-            host, port_str = url_parts.split(':', 1)
-            port = int(port_str)
-        else:
-            host = url_parts
-            port = 2101  # Default NTRIP port
-
-        print(f"🔗 Connecting to NTRIP caster: {host}:{port}")
-        print(f"📍 Mountpoint: {self._config.mountpoint}")
-
-        # Debug credentials (mask password for security)
-        if self._config.username or self._config.password:
-            masked_password = '*' * len(self._config.password) if self._config.password else '(empty)'
-            print(f"🔐 Using credentials: {self._config.username} / {masked_password}")
-        else:
-            print("🔓 No credentials provided (anonymous access)")
-
-        # Connect to NTRIP caster
-        try:
-            reader, writer = await asyncio.open_connection(host, port)
-            print(f"✅ TCP connection established to {host}:{port}")
-        except Exception as e:
-            raise Exception(f"Failed to connect to {host}:{port}: {e}")
+        """Connect to NTRIP caster and forward RTCM data - raises exception on ANY error"""
+        connection_established = False
+        reader = None
+        writer = None
 
         try:
+            # Parse URL properly
+            url_parts = self._config.ntrip_url.replace('http://', '').replace('https://', '')
+            if ':' in url_parts:
+                host, port_str = url_parts.split(':', 1)
+                port = int(port_str)
+            else:
+                host = url_parts
+                port = 2101  # Default NTRIP port
+
+            print(f"🔗 Connecting to NTRIP caster: {host}:{port}")
+            print(f"📍 Mountpoint: {self._config.mountpoint}")
+
+            # Debug credentials (mask password for security)
+            if self._config.username or self._config.password:
+                masked_password = '*' * len(self._config.password) if self._config.password else '(empty)'
+                print(f"🔐 Using credentials: {self._config.username} / {masked_password}")
+            else:
+                print("🔓 No credentials provided (anonymous access)")
+
+            # Connect to NTRIP caster with timeout
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=30.0  # 30 second connection timeout
+                )
+                print(f"✅ TCP connection established to {host}:{port}")
+            except asyncio.TimeoutError:
+                raise Exception(f"Connection timeout to {host}:{port} (30 seconds)")
+            except Exception as e:
+                raise Exception(f"Failed to connect to {host}:{port}: {e}")
+
             # Send NTRIP request
             auth = f"{self._config.username}:{self._config.password}"
             auth_encoded = base64.b64encode(auth.encode()).decode()
@@ -346,11 +408,14 @@ class RTKController(Controller):
             await writer.drain()
             print(f"✅ Request sent successfully")
 
-            # Read response header
+            # Read response header with timeout
             print(f"📥 Reading server response...")
-            response = await reader.readline()
-            response_str = response.decode().strip()
-            print(f"📥 Server response: {response_str}")
+            try:
+                response = await asyncio.wait_for(reader.readline(), timeout=30.0)
+                response_str = response.decode().strip()
+                print(f"📥 Server response: {response_str}")
+            except asyncio.TimeoutError:
+                raise Exception("Timeout waiting for server response (30 seconds)")
 
             if b"200 OK" not in response:
                 # Read more response lines for better debugging
@@ -394,10 +459,17 @@ class RTKController(Controller):
 
             print(f"📥 Read {header_count} response headers")
 
+            # Mark connection as successfully established
+            connection_established = True
             self._status.connected = True
             self._status.error_message = None
             self._status.last_update = datetime.now().isoformat()
             print(f"🎉 Connected to NTRIP caster, starting to receive RTCM data...")
+
+            # Reset failure counter after successful connection establishment
+            if hasattr(self, '_ntrip_client_loop'):
+                # Reset will happen in the main loop after we return successfully
+                pass
 
             # Reset RTCM parser for new connection
             self._rtcm_parser = RTCMParser()
@@ -408,82 +480,144 @@ class RTKController(Controller):
             total_rtcm_messages = 0
             total_mavlink_messages = 0
             failed_mavlink_sends = 0
+            last_data_time = datetime.now()
+            read_timeout = 60.0  # 60 second timeout for data reads
 
+            # Main data reading loop - ANY error here will trigger reconnection
             while True:
-                data = await reader.read(1024)
-                if not data:
-                    print(f"📡 NTRIP stream ended")
-                    print(f"   Total chunks received: {data_chunks}")
-                    print(f"   Total RTCM bytes: {total_rtcm_bytes}")
-                    print(f"   Total RTCM messages parsed: {total_rtcm_messages}")
-                    print(f"   Total MAVLink messages sent: {total_mavlink_messages}")
-                    print(f"   Failed MAVLink sends: {failed_mavlink_sends}")
-                    break
-
-                data_chunks += 1
-                chunk_size = len(data)
-                total_rtcm_bytes += chunk_size
-                self._status.bytes_received += chunk_size
-                self._status.last_update = datetime.now().isoformat()
-
-                # Log periodic progress with more detail
-                if data_chunks % 50 == 0:
-                    print(f"📡 Progress: {data_chunks} chunks, {total_rtcm_bytes} RTCM bytes, {total_rtcm_messages} RTCM msgs, {total_mavlink_messages} MAVLink msgs")
-
-                # Parse RTCM messages from this chunk
                 try:
-                    rtcm_messages = self._rtcm_parser.add_data(data)
-                    total_rtcm_messages += len(rtcm_messages)
+                    # Read data with timeout to detect stalled connections
+                    data = await asyncio.wait_for(reader.read(1024), timeout=read_timeout)
 
-                    # Process each complete RTCM message
-                    for rtcm_message in rtcm_messages:
-                        # Increment RTCM sequence for each complete RTCM message (wrap at 31 for 5-bit field)
-                        self._rtcm_sequence = (self._rtcm_sequence + 1) % 32
+                    if not data:
+                        # Connection closed by server - this is a disconnect that should trigger reconnection
+                        print(f"🔌 NTRIP server closed connection")
+                        print(f"   Session stats:")
+                        print(f"   • Total chunks received: {data_chunks}")
+                        print(f"   • Total RTCM bytes: {total_rtcm_bytes}")
+                        print(f"   • Total RTCM messages parsed: {total_rtcm_messages}")
+                        print(f"   • Total MAVLink messages sent: {total_mavlink_messages}")
+                        print(f"   • Failed MAVLink sends: {failed_mavlink_sends}")
 
-                        # Split RTCM message into 180-byte chunks for MAVLink
-                        mavlink_chunks_this_msg = 0
-                        chunks = []
-                        for i in range(0, len(rtcm_message), 180):
-                            chunks.append(rtcm_message[i:i+180])
+                        # This will trigger reconnection
+                        raise Exception("NTRIP server closed connection")
 
-                        # Send each chunk with proper fragmentation flags
-                        for fragment_index, chunk in enumerate(chunks):
-                            # Determine if this message is fragmented
-                            is_fragmented = len(chunks) > 1
-                            # Fragment ID is only 2 bits (0-3), so wrap at 4
-                            fragment_id = fragment_index % 4
-                            is_last_fragment = fragment_index == len(chunks) - 1
+                    # Update data reception tracking
+                    data_chunks += 1
+                    chunk_size = len(data)
+                    total_rtcm_bytes += chunk_size
+                    self._status.bytes_received += chunk_size
+                    self._status.last_update = datetime.now().isoformat()
+                    last_data_time = datetime.now()
 
-                            # Try to send this chunk
-                            send_success = await self._send_rtcm_to_mavlink(
-                                chunk,
-                                fragment_id,
-                                is_fragmented,
-                                is_last_fragment,
-                                self._rtcm_sequence
-                            )
-                            if send_success:
-                                total_mavlink_messages += 1
-                                mavlink_chunks_this_msg += 1
-                            else:
-                                failed_mavlink_sends += 1
+                    # Log periodic progress with more detail
+                    if data_chunks % 50 == 0:
+                        print(f"📡 Progress: {data_chunks} chunks, {total_rtcm_bytes} RTCM bytes, {total_rtcm_messages} RTCM msgs, {total_mavlink_messages} MAVLink msgs")
 
-                        # Log detailed per-RTCM message info occasionally
-                        if total_rtcm_messages % 50 == 0:
-                            chunks_expected = len(chunks)
-                            rtcm_msg_size = len(rtcm_message)
-                            print(f"📊 RTCM msg #{total_rtcm_messages}: {rtcm_msg_size} bytes → {chunks_expected} MAVLink msgs ({mavlink_chunks_this_msg} sent)")
-                            print(f"   RTCM seq: {self._rtcm_sequence}, Fragmented: {len(chunks) > 1}")
-                            if len(chunks) > 4:
-                                print(f"   ⚠️  Large fragmentation: {len(chunks)} fragments will wrap fragment IDs")
+                    # Parse RTCM messages from this chunk
+                    try:
+                        rtcm_messages = self._rtcm_parser.add_data(data)
+                        total_rtcm_messages += len(rtcm_messages)
+
+                        # Process each complete RTCM message
+                        for rtcm_message in rtcm_messages:
+                            # Increment RTCM sequence for each complete RTCM message (wrap at 31 for 5-bit field)
+                            self._rtcm_sequence = (self._rtcm_sequence + 1) % 32
+
+                            # Split RTCM message into 180-byte chunks for MAVLink
+                            mavlink_chunks_this_msg = 0
+                            chunks = []
+                            for i in range(0, len(rtcm_message), 180):
+                                chunks.append(rtcm_message[i:i+180])
+
+                            # Send each chunk with proper fragmentation flags
+                            for fragment_index, chunk in enumerate(chunks):
+                                # Determine if this message is fragmented
+                                is_fragmented = len(chunks) > 1
+                                # Fragment ID is only 2 bits (0-3), so wrap at 4
+                                fragment_id = fragment_index % 4
+                                is_last_fragment = fragment_index == len(chunks) - 1
+
+                                # Try to send this chunk
+                                send_success = await self._send_rtcm_to_mavlink(
+                                    chunk,
+                                    fragment_id,
+                                    is_fragmented,
+                                    is_last_fragment,
+                                    self._rtcm_sequence
+                                )
+                                if send_success:
+                                    total_mavlink_messages += 1
+                                    mavlink_chunks_this_msg += 1
+                                else:
+                                    failed_mavlink_sends += 1
+
+                            # Log detailed per-RTCM message info occasionally
+                            if total_rtcm_messages % 50 == 0:
+                                chunks_expected = len(chunks)
+                                rtcm_msg_size = len(rtcm_message)
+                                print(f"📊 RTCM msg #{total_rtcm_messages}: {rtcm_msg_size} bytes → {chunks_expected} MAVLink msgs ({mavlink_chunks_this_msg} sent)")
+                                print(f"   RTCM seq: {self._rtcm_sequence}, Fragmented: {len(chunks) > 1}")
+                                if len(chunks) > 4:
+                                    print(f"   ⚠️  Large fragmentation: {len(chunks)} fragments will wrap fragment IDs")
+
+                    except Exception as e:
+                        print(f"⚠️  Error processing RTCM data in chunk {data_chunks}: {e}")
+                        # Continue processing - don't let RTCM parsing errors kill the connection
+
+                except asyncio.TimeoutError:
+                    # No data received within timeout period - check if connection is still alive
+                    time_since_data = (datetime.now() - last_data_time).total_seconds()
+                    print(f"⏰ No data received for {time_since_data:.1f} seconds")
+
+                    if time_since_data > 120:  # More than 2 minutes without data
+                        print(f"🔌 Connection appears stalled - triggering reconnection")
+                        raise Exception("Connection stalled - no data received for over 2 minutes")
+                    else:
+                        # Continue waiting for data
+                        print(f"   Continuing to wait for data...")
+                        continue
 
                 except Exception as e:
-                    print(f"⚠️  Error processing RTCM data in chunk {data_chunks}: {e}")
+                    # ANY other error during data reading should trigger reconnection
+                    print(f"❌ Error reading from NTRIP stream: {e}")
+                    raise Exception(f"Data read error: {str(e)}")
+
+        except asyncio.CancelledError:
+            # Pass cancellation up to the main loop
+            raise
+
+        except Exception as e:
+            # Mark connection as failed and ensure status is updated
+            if connection_established:
+                print(f"❌ Connection lost after successful establishment: {e}")
+            else:
+                print(f"❌ Failed to establish connection: {e}")
+
+            # Make sure status reflects the error
+            self._status.connected = False
+            self._status.error_message = str(e)
+            self._status.last_update = datetime.now().isoformat()
+
+            # Re-raise to trigger retry in main loop
+            raise
 
         finally:
-            writer.close()
-            await writer.wait_closed()
-            print(f"🔌 NTRIP connection closed")
+            # Always clean up the connection, regardless of how we got here
+            if writer is not None:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                    print(f"🔌 NTRIP connection closed cleanly")
+                except Exception as e:
+                    print(f"⚠️  Error closing connection: {e}")
+
+            # Update status if connection was lost
+            if connection_established:
+                self._status.connected = False
+                if not self._status.error_message or self._status.error_message == "None":
+                    self._status.error_message = "Connection lost - reconnecting"
+                self._status.last_update = datetime.now().isoformat()
 
     async def _send_rtcm_to_mavlink(self, rtcm_data: bytes, fragment_id: int, is_fragmented: bool, is_last_fragment: bool, rtcm_sequence: int) -> bool:
         """Send RTCM data via mavlink2rest GPS_RTCM_DATA message
