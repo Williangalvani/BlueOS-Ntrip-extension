@@ -151,6 +151,23 @@
             </div>
 
             <div class="section">
+                <h2>🛰️ GPS Location</h2>
+                <div id="gps-display">
+                    <div id="gps-info" class="status-info">
+                        <div>Latitude: <span id="gps-lat">Unknown</span></div>
+                        <div>Longitude: <span id="gps-lon">Unknown</span></div>
+                        <div>Altitude: <span id="gps-alt">Unknown</span></div>
+                        <div>Last GPS update: <span id="gps-update">Never</span></div>
+                        <div>Last sent to server: <span id="gps-sent">Never</span></div>
+                        <div id="gps-status" style="margin-top: 10px; font-weight: bold;">Checking GPS...</div>
+                    </div>
+                    <div class="help-text" style="margin-top: 10px;">
+                        NTRIP servers may require your GPS location to provide corrections
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
                 <h2>⚙️ Configuration</h2>
                 <form id="config-form">
                     <div class="config-section">
@@ -298,6 +315,69 @@
                 errorMessage.textContent = status.error_message;
             } else {
                 errorDisplay.style.display = 'none';
+            }
+
+            // Update GPS location if available in status
+            if (status.vehicle_location) {
+                updateGPSDisplay({
+                    status: 'success',
+                    location: status.vehicle_location,
+                    last_update: status.vehicle_location_time,
+                    last_gga_sent: status.last_gga_sent_time,
+                    gga_send_success: status.gga_send_success
+                });
+            } else {
+                // No GPS location available
+                updateGPSDisplay({
+                    status: 'no_location',
+                    message: 'No GPS fix available'
+                });
+            }
+        }
+
+        // Update GPS display
+        function updateGPSDisplay(gpsData) {
+            const gpsLat = document.getElementById('gps-lat');
+            const gpsLon = document.getElementById('gps-lon');
+            const gpsAlt = document.getElementById('gps-alt');
+            const gpsUpdate = document.getElementById('gps-update');
+            const gpsSent = document.getElementById('gps-sent');
+            const gpsStatus = document.getElementById('gps-status');
+
+            if (gpsData.status === 'success' && gpsData.location) {
+                gpsLat.textContent = `${gpsData.location.lat.toFixed(6)}°`;
+                gpsLon.textContent = `${gpsData.location.lon.toFixed(6)}°`;
+                gpsAlt.textContent = `${gpsData.location.alt.toFixed(1)}m`;
+                gpsUpdate.textContent = gpsData.last_update || 'Unknown';
+                gpsSent.textContent = gpsData.last_gga_sent || 'Never';
+
+                // Use backend's GGA send status instead of calculating staleness
+                if (gpsData.gga_send_success && gpsData.last_gga_sent) {
+                    gpsStatus.textContent = '✅ Location sent to NTRIP server';
+                    gpsStatus.style.color = '#4caf50';
+                } else if (gpsData.last_gga_sent) {
+                    gpsStatus.textContent = '⚠️ Last location send failed';
+                    gpsStatus.style.color = '#ff9800';
+                } else {
+                    gpsStatus.textContent = '⚠️ Location not yet sent to server';
+                    gpsStatus.style.color = '#ff9800';
+                }
+            } else if (gpsData.status === 'no_location') {
+                gpsLat.textContent = 'No fix';
+                gpsLon.textContent = 'No fix';
+                gpsAlt.textContent = 'No fix';
+                gpsUpdate.textContent = 'Never';
+                gpsSent.textContent = 'Never';
+                gpsStatus.textContent = '❌ No GPS fix';
+                gpsStatus.style.color = '#f44336';
+            } else {
+                gpsLat.textContent = 'Error';
+                gpsLon.textContent = 'Error';
+                gpsAlt.textContent = 'Error';
+                gpsUpdate.textContent = 'Error';
+                gpsSent.textContent = 'Error';
+                gpsStatus.textContent = `❌ GPS error: ${gpsData.message || 'Unknown error'}`;
+                gpsStatus.style.color = '#f44336';
             }
         }
 

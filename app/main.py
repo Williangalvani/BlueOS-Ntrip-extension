@@ -9,6 +9,8 @@ import base64
 import aiohttp
 import argparse
 import sys
+import time
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -38,6 +40,10 @@ class RTKStatus(BaseModel):
     last_update: Optional[str] = None
     bytes_received: int = 0
     error_message: Optional[str] = None
+    vehicle_location: Optional[Dict[str, float]] = None  # {"lat": x, "lon": y, "alt": z}
+    vehicle_location_time: Optional[str] = None
+    last_gga_sent_time: Optional[str] = None  # When we last sent GGA to NTRIP server
+    gga_send_success: bool = False  # Whether last GGA send was successful
 
 class ConfigManager:
     """Manages configuration storage in a local JSON file"""
@@ -149,6 +155,46 @@ class RTCMParser:
 
         return len(message) == expected_total
 
+def generate_gga_message(lat: float, lon: float, alt: float) -> bytes:
+    """Generate a GGA NMEA message for NTRIP location reporting
+
+    Args:
+        lat: Latitude in decimal degrees
+        lon: Longitude in decimal degrees  
+        alt: Altitude in meters
+
+    Returns:
+        Complete GGA message as bytes including CRLF
+    """
+
+    # Convert decimal degrees to degrees and minutes
+    lat_deg = int(abs(lat))
+    lat_min = (abs(lat) - lat_deg) * 60.0
+    lat_ns = 'N' if lat >= 0 else 'S'
+
+    lon_deg = int(abs(lon))
+    lon_min = (abs(lon) - lon_deg) * 60.0
+    lon_ew = 'E' if lon >= 0 else 'W'
+
+    # Get current time
+    now = datetime.utcnow()
+    time_str = now.strftime('%H%M%S.%f')[:-3]  # HHMMSS.sss
+
+    # Build GGA message (without checksum)
+    gga_data = (f"GPGGA,{time_str},"
+                f"{lat_deg:02d}{lat_min:07.4f},{lat_ns},"
+                f"{lon_deg:03d}{lon_min:07.4f},{lon_ew},"
+                f"1,08,1.0,{alt:.1f},M,0.0,M,,")
+
+    # Calculate NMEA checksum
+    checksum = 0
+    for char in gga_data:
+        checksum ^= ord(char)
+
+    # Complete message with $ prefix and checksum
+    complete_message = f"${gga_data}*{checksum:02X}\r\n"
+    return complete_message.encode('ascii')
+
 class RTKController(Controller):
     def __init__(self, owner: "Litestar") -> None:
         super().__init__(owner)
@@ -159,6 +205,11 @@ class RTKController(Controller):
         self._mavlink_sequence = 0  # Track MAVLink message sequence
         self._rtcm_sequence = 0     # Track RTCM sequence (5 bits, 0-31)
         self._rtcm_parser = RTCMParser()  # Parse RTCM message boundaries
+        self._last_gga_time = 0     # Track when we last sent a GGA message
+        self._last_gga_success = False  # Track if last GGA send was successful
+        self._vehicle_system_id = None  # Discovered vehicle system ID
+        self._vehicle_location = None  # vehicle GPS location (lat, lon, alt) in decimal degrees and meters
+        self._vehicle_location_update = 0  # system time (in sec since epoch) when vehicle location received
 
     def _is_config_valid(self) -> bool:
         """Check if the current configuration is valid for connecting"""
@@ -229,7 +280,24 @@ class RTKController(Controller):
     @get("/status", sync_to_thread=False)
     def get_status(self) -> Dict[str, Any]:
         """Get current RTK status"""
-        return self._status.model_dump()
+        status = self._status.model_dump()
+
+        # Add current GPS location info if available
+        if self._vehicle_location:
+            lat, lon, alt = self._vehicle_location
+            status['vehicle_location'] = {
+                "lat": lat,
+                "lon": lon, 
+                "alt": alt
+            }
+            status['vehicle_location_time'] = datetime.utcfromtimestamp(self._vehicle_location_update).isoformat() + 'Z'
+        
+        # Add GGA send status
+        if self._last_gga_time > 0:
+            status['last_gga_sent_time'] = datetime.utcfromtimestamp(self._last_gga_time).isoformat() + 'Z'
+        status['gga_send_success'] = self._last_gga_success
+
+        return status
 
     async def _start_ntrip_connection(self):
         """Start NTRIP client connection and forward RTCM data to mavlink2rest"""
@@ -474,6 +542,16 @@ class RTKController(Controller):
             # Reset RTCM parser for new connection
             self._rtcm_parser = RTCMParser()
 
+            # Send GPS location if available
+            print(f"📍 Sending initial GGA location message...")
+            try:
+                await self._send_gga_message(writer)
+                self._last_gga_success = True
+                print(f"✅ Initial GGA message sent successfully")
+            except Exception as e:
+                self._last_gga_success = False
+                print(f"⚠️  Warning: Failed to send initial GGA message: {e}")
+
             # Forward RTCM data to mavlink2rest
             data_chunks = 0
             total_rtcm_bytes = 0
@@ -509,6 +587,18 @@ class RTKController(Controller):
                     self._status.bytes_received += chunk_size
                     self._status.last_update = datetime.now().isoformat()
                     last_data_time = datetime.now()
+
+                    # Send periodic GGA messages - many NTRIP servers require this to maintain connection
+                    current_time = time.time()
+                    if current_time - self._last_gga_time > 10.0:  # Send every 10 seconds
+                        try:
+                            await self._send_gga_message(writer)
+                            self._last_gga_success = True
+                            print(f"📍 Periodic GGA message sent")
+                        except Exception as e:
+                            self._last_gga_success = False
+                            print(f"⚠️  Warning: Failed to send periodic GGA message: {e}")
+                            # Don't fail the connection for this
 
                     # Log periodic progress with more detail
                     if data_chunks % 50 == 0:
@@ -618,6 +708,165 @@ class RTKController(Controller):
                 if not self._status.error_message or self._status.error_message == "None":
                     self._status.error_message = "Connection lost - reconnecting"
                 self._status.last_update = datetime.now().isoformat()
+
+    async def _discover_vehicle_system_id(self) -> Optional[int]:
+        """Discover vehicle system ID by finding first vehicle with GPS data
+
+        Returns:
+            int: System ID of vehicle with GPS, or None if not found
+        """
+        if not self._config.mavlink2rest_url:
+            return None
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # Get list of vehicles from mavlink2rest
+                vehicles_path = f"{self._config.mavlink2rest_url}/mavlink/vehicles"
+                async with session.get(vehicles_path) as response:
+                    if response.status == 200:
+                        vehicles_data = await response.json()
+
+                        # Extract vehicle IDs (keys are system IDs)
+                        if isinstance(vehicles_data, dict):
+                            # Keys might be strings or integers - convert to int and filter out non-numeric
+                            vehicle_ids = sorted([int(vid) for vid in vehicles_data.keys() if str(vid).isdigit()])
+                            if vehicle_ids:
+                                print(f"✅ Found vehicles: {vehicle_ids}")
+
+                                # Try each vehicle to see if it has location data
+                                message_types = ['GLOBAL_POSITION_INT', 'GPS_RAW_INT']
+                                for sys_id in vehicle_ids:
+                                    for msg_type in message_types:
+                                        api_path = f"{self._config.mavlink2rest_url}/mavlink/vehicles/{sys_id}/components/1/messages/{msg_type}/message"
+                                        try:
+                                            async with session.get(api_path) as msg_response:
+                                                if msg_response.status == 200:
+                                                    data = await msg_response.json()
+                                                    lat_raw = data.get('lat', 0)
+                                                    lon_raw = data.get('lon', 0)
+                                                    if lat_raw != 0 and lon_raw != 0:
+                                                        print(f"✅ Using vehicle SysID {sys_id}, {msg_type}: lat={lat_raw}, lon={lon_raw}")
+                                                        return sys_id
+                                        except Exception as e:
+                                            print(f"      {msg_type}: Error - {e}")
+                                            continue
+
+                                # If no vehicle has GPS data yet, use the first/lowest ID
+                                print(f"⚠️  No vehicle has GPS data yet, using lowest ID: {vehicle_ids[0]}")
+                                return vehicle_ids[0]
+        except Exception as e:
+            print(f"⚠️  Could not discover vehicle system ID: {e}")
+
+        # Fall back to system ID 1 if discovery fails
+        print(f"⚠️  Using default system ID: 1")
+        return 1
+
+    async def _get_vehicle_location(self) -> Optional[tuple]:
+        """Get current GPS location from vehicle via mavlink2rest
+           using GLOBAL_POSITION_INT (preferred) or GPS_RAW_INT (fallback) messages
+
+        Returns:
+            tuple: (lat, lon, alt) in decimal degrees and meters, or None if unavailable
+        """
+        if not self._config.mavlink2rest_url:
+            print("⚠️  No mavlink2rest URL configured")
+            return None
+
+        # Track if this is first attempt for debug logging
+        if not hasattr(self, '_gps_fetch_logged'):
+            self._gps_fetch_logged = False
+
+        # Discover vehicle system ID on first call
+        if self._vehicle_system_id is None:
+            self._vehicle_system_id = await self._discover_vehicle_system_id()
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # Try GLOBAL_POSITION_INT first (fused EKF estimate), then fall back to GPS_RAW_INT (raw GPS)
+                message_types = ['GLOBAL_POSITION_INT', 'GPS_RAW_INT']
+
+                for msg_type in message_types:
+                    api_path = f"{self._config.mavlink2rest_url}/mavlink/vehicles/{self._vehicle_system_id}/components/1/messages/{msg_type}/message"
+
+                    try:
+                        async with session.get(api_path) as response:
+                            if response.status == 200:
+                                data = await response.json()
+
+                                # Debug log on first successful fetch
+                                if not self._gps_fetch_logged:
+                                    print(f"🔍 GPS API: {api_path}")
+                                    print(f"   Keys: {list(data.keys())}")
+
+                                # Extract GPS data (direct format from /message endpoint)
+                                lat_raw = data.get('lat', 0)
+                                lon_raw = data.get('lon', 0)
+                                alt_raw = data.get('alt', 0)  # Both message types use mm above MSL
+
+                                # Debug on first fetch
+                                if not self._gps_fetch_logged:
+                                    print(f"   {msg_type} data: lat={lat_raw}, lon={lon_raw}, alt={alt_raw}")
+
+                                # Check if we have valid location data
+                                if lat_raw != 0 and lon_raw != 0:
+                                    # Convert from MAVLink units (1e7 for lat/lon, mm for alt)
+                                    lat = lat_raw * 1e-7
+                                    lon = lon_raw * 1e-7
+                                    alt = alt_raw * 1e-3  # mm to meters
+
+                                    self._vehicle_location = (lat, lon, alt)
+                                    self._vehicle_location_update = time.time()
+
+                                    # Log first successful location
+                                    if not self._gps_fetch_logged:
+                                        print(f"✅ GPS location from {msg_type} (system {self._vehicle_system_id}): {lat:.6f}°, {lon:.6f}°, {alt:.1f}m")
+                                        self._gps_fetch_logged = True
+
+                                    return self._vehicle_location
+                    except Exception as e:
+                        if not self._gps_fetch_logged:
+                            print(f"   {msg_type} fetch failed: {e}")
+                        continue
+
+                # If we get here, neither message type worked - use cached location if available
+                if self._vehicle_location:
+                    return self._vehicle_location
+
+        except Exception as e:
+            if not self._gps_fetch_logged:
+                print(f"❌ GPS fetch error: {e}")
+                self._gps_fetch_logged = True
+            
+            # On error, use cached location if available
+            if self._vehicle_location:
+                return self._vehicle_location
+
+        return None
+
+    async def _send_gga_message(self, writer) -> None:
+        """Send GGA message to NTRIP server to report location
+        
+        Many NTRIP servers require periodic location updates to maintain the connection.
+        This sends a GGA NMEA message with the current vehicle location from GPS.
+        """
+        try:
+            # Get current vehicle location
+            location = await self._get_vehicle_location()
+            
+            if location is None:
+                raise Exception("No GPS location available from vehicle - need 3D fix for NTRIP")
+            
+            lat, lon, alt = location
+            
+            gga_message = generate_gga_message(lat, lon, alt)
+            writer.write(gga_message)
+            await writer.drain()
+            self._last_gga_time = time.time()
+            
+        except Exception as e:
+            raise Exception(f"Failed to send GGA message: {e}")
 
     async def _send_rtcm_to_mavlink(self, rtcm_data: bytes, fragment_id: int, is_fragmented: bool, is_last_fragment: bool, rtcm_sequence: int) -> bool:
         """Send RTCM data via mavlink2rest GPS_RTCM_DATA message
