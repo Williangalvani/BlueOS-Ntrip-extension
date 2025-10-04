@@ -452,20 +452,17 @@ class RTKController(Controller):
                 print(f"   ❌ Base64 encoding error: {e}")
 
             # Debug the exact request being sent
-            request = (f"GET /{self._config.mountpoint} HTTP/1.1\r\n"
+            request = (f"GET /{self._config.mountpoint} HTTP/1.0\r\n"
                       f"Host: {host}:{port}\r\n"
-                      f"User-Agent: NTRIP BlueOS-RTK-Extension\r\n"
+                      f"User-Agent: NTRIP BlueOS-RTK-Extension/1.0\r\n"
                       f"Authorization: Basic {auth_encoded}\r\n"
-                      f"Ntrip-Version: Ntrip/2.0\r\n"
-                      f"Connection: close\r\n\r\n")
+                      f"\r\n")
 
             print(f"📤 Sending NTRIP request:")
-            print(f"   GET /{self._config.mountpoint} HTTP/1.1")
+            print(f"   GET /{self._config.mountpoint} HTTP/1.0")
             print(f"   Host: {host}:{port}")
-            print(f"   User-Agent: NTRIP BlueOS-RTK-Extension")
-            print(f"   Authorization: Basic {auth_encoded}")
-            print(f"   Ntrip-Version: Ntrip/2.0")
-            print(f"   Connection: close")
+            print(f"   User-Agent: NTRIP BlueOS-RTK-Extension/1.0")
+            print(f"   Authorization: Basic {auth_encoded[:8]}...")
 
             # Debug the exact bytes being sent
             request_bytes = request.encode()
@@ -485,7 +482,10 @@ class RTKController(Controller):
             except asyncio.TimeoutError:
                 raise Exception("Timeout waiting for server response (30 seconds)")
 
-            if b"200 OK" not in response:
+            # Check response - handle both NTRIP v1 (ICY 200 OK) and v2 (HTTP/1.x 200 OK)
+            response_is_ok = (b"200 OK" in response or b"ICY 200 OK" in response)
+            
+            if not response_is_ok:
                 # Read more response lines for better debugging
                 additional_lines = []
                 try:
@@ -519,7 +519,7 @@ class RTKController(Controller):
             header_count = 0
             while True:
                 line = await reader.readline()
-                if line == b'\r\n':
+                if line == b'\r\n' or line == b'\n':
                     break
                 header_count += 1
                 if header_count <= 3:  # Show first few headers for debugging
